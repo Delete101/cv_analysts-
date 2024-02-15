@@ -2,208 +2,208 @@ import sys
 import numpy as np
 import cv2
 from PyQt5.QtWidgets import QApplication, QWidget, QPushButton, QVBoxLayout, QLabel, QFileDialog
-from skimage.metrics import structural_similarity as compare_ssim
-from scipy.optimize import minimize
-
 
 clicks = {'image1': [], 'image2': []}
-
-
-
-def optimization_objective(params, image1, image2, points1, points2):
-    dx, dy, angle, scale = params
-    center = (image2.shape[1] // 2, image2.shape[0] // 2)
-    M = cv2.getRotationMatrix2D(center, angle, scale)
-    M[:, 2] += [dx, dy]
-    transformed = cv2.warpAffine(image2, M, (image1.shape[1], image1.shape[0]))
-    transformed_gray = cv2.cvtColor(transformed, cv2.COLOR_RGB2GRAY)
-    image1_gray = cv2.cvtColor(image1, cv2.COLOR_RGB2GRAY)
-
-    # Вычисляем схожесть только для выбранных областей вокруг контрольных точек
-    ssim_total = 0
-    for p1, p2 in zip(points1, points2):
-        roi1 = image1_gray[p1[1]-50:p1[1]+50, p1[0]-50:p1[0]+50]
-        roi2 = transformed_gray[p2[1]-50:p2[1]+50, p2[0]-50:p2[0]+50]
-        if roi1.shape == roi2.shape and roi1.size > 0 and roi2.size > 0:
-            ssim_value = compare_ssim(roi1, roi2)
-            ssim_total += ssim_value
-    ssim_avg = ssim_total / len(points1) if points1 else 0
-
-    return -ssim_avg  # Максимизируем среднее значение SSIM
-
+images = {'image1': None, 'image2': None}
 
 
 def adjust_image(image_path):
-    img = cv2.imread(image_path, -1)
-    if img.dtype == np.uint16:
-        img = cv2.normalize(img, None, 0, 65535, cv2.NORM_MINMAX)
-    img = np.uint8(img / 256 if img.dtype == np.uint16 else img)
-    # Применение CLAHE (Contrast Limited Adaptive Histogram Equalization)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    if len(img.shape) == 2 or img.shape[2] == 1:  # для одноканальных изображений
-        img = clahe.apply(img)
-    else:  # для многоканальных изображений
-        for i in range(img.shape[2]):
-            img[:, :, i] = clahe.apply(img[:, :, i])
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    img = cv2.imread(image_path)
+    if img is not None:
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     return img
 
 
+def optimize_image_contrast(image, clip_limit=3.0):
+    if image.ndim == 3:
+        lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
+        l_clahe = clahe.apply(l)
+        lab_clahe = cv2.merge((l_clahe, a, b))
+        result = cv2.cvtColor(lab_clahe, cv2.COLOR_LAB2RGB)
+    else:
+        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
+        result = clahe.apply(image)
+    return result
+
+
+def align_and_crop(transformed_image, reference_image, trans_first_point, ref_first_point):
+    # Вычисляем смещение между первыми точками после трансформации
+    dy, dx = np.array(ref_first_point) - np.array(trans_first_point)
+
+    # Применяем смещение к трансформированному изображению
+    rows, cols = transformed_image.shape[:2]
+    M_trans = np.float32([[1, 0, dx], [0, 1, dy]])
+    aligned_image = cv2.warpAffine(transformed_image, M_trans, (cols, rows))
+
+    # Обрезка изображения до размеров reference_image, если оно выходит за его пределы
+    aligned_cropped_image = aligned_image[:reference_image.shape[0], :reference_image.shape[1]]
+
+    return aligned_cropped_image
+
+
+
+
+def optimize_image_contrast(image, clip_limit=3.0):
+    if image.ndim == 3:
+        lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
+        l_clahe = clahe.apply(l)
+        lab_clahe = cv2.merge((l_clahe, a, b))
+        result = cv2.cvtColor(lab_clahe, cv2.COLOR_LAB2RGB)
+    else:
+        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
+        result = clahe.apply(image)
+    return result
+
+
+
 def click_event(event, x, y, flags, param):
-    global clicks
     if event == cv2.EVENT_LBUTTONDOWN:
-        points = clicks[param['name']]
-        if len(points) >= 2:
-            points.clear()
-        points.append((x, y))
-        for idx, point in enumerate(points):
-            color = (255, 0, 0) if idx == 0 else (0, 255, 0)
-            cv2.circle(param['image'], point, 5, color, -1)
-        cv2.imshow(param['name'], param['image'])
+        if len(clicks[param]) < 2:
+            clicks[param].append((x, y))
+            color = (255, 0, 0) if len(clicks[param]) == 1 else (0, 255, 0)
+            cv2.circle(images[param], (x, y), 5, color, -1)
+            cv2.imshow(param, images[param])
+
+
+def calculate_transformation(points1, points2):
+    p1, p2 = np.array(points1[0]), np.array(points1[1])
+    q1, q2 = np.array(points2[0]), np.array(points2[1])
+
+    vec_p = p2 - p1
+    vec_q = q2 - q1
+    cos_angle = np.dot(vec_p, vec_q) / (np.linalg.norm(vec_p) * np.linalg.norm(vec_q))
+    angle = np.arccos(np.clip(cos_angle, -1.0, 1.0))
+    angle_deg = np.degrees(angle)
+
+    scale = np.linalg.norm(vec_q) / np.linalg.norm(vec_p)
+
+    return angle_deg, scale
+
+
+def transform_image(image, angle, scale):
+    # Получаем исходные размеры изображения
+    rows, cols = image.shape[:2]
+
+    # Рассчитываем новые размеры с сохранением пропорций
+    new_cols = int(cols * scale)
+    new_rows = int(rows * scale)
+
+    # Применяем масштабирование с новыми размерами
+    scaled_image = cv2.resize(image, (new_cols, new_rows), interpolation=cv2.INTER_LINEAR)
+
+    # Расчет нового размера канвы для избежания обрезки при повороте
+    angle_rad = np.radians(angle)
+    cos_angle = np.abs(np.cos(angle_rad))
+    sin_angle = np.abs(np.sin(angle_rad))
+    new_width = int((new_rows * sin_angle) + (new_cols * cos_angle))
+    new_height = int((new_rows * cos_angle) + (new_cols * sin_angle))
+
+    # Создание канвы с дополнительными пикселями для избежания обрезки
+    canvas = np.zeros((new_height, new_width, 3), dtype=np.uint8)
+
+    # Позиционирование масштабированного изображения в центре канвы
+    offset_x = (new_width - new_cols) // 2
+    offset_y = (new_height - new_rows) // 2
+    canvas[offset_y:offset_y + new_rows, offset_x:offset_x + new_cols] = scaled_image
+
+    # Матрица поворота для поворота вокруг центра новой канвы
+    M = cv2.getRotationMatrix2D((new_width / 2, new_height / 2), -angle, 1)
+
+    # Применяем поворот
+    transformed = cv2.warpAffine(canvas, M, (new_width, new_height))
+
+    return transformed
+
 
 class ImageApp(QWidget):
     def __init__(self):
         super().__init__()
-        self.image1 = None
-        self.image2 = None
-        self.initUI()
+        self.setWindowTitle('Image Overlay and Analysis')
+        self.setGeometry(100, 100, 800, 600)
+        layout = QVBoxLayout()
 
-    def calculate_ssim(image1, image2, points1, points2, window_size=100):
-        ssim_values = []
-        for p1, p2 in zip(points1, points2):
-            x1, y1 = max(0, p1[0] - window_size // 2), max(0, p1[1] - window_size // 2)
-            x2, y2 = max(0, p2[0] - window_size // 2), max(0, p2[1] - window_size // 2)
-            roi1 = image1[y1:y1 + window_size, x1:x1 + window_size]
-            roi2 = image2[y2:y2 + window_size, x2:x2 + window_size]
-            # Адаптация размера окна
-            adjusted_window_size = min(roi1.shape[:2] + roi2.shape[:2])
-            adjusted_window_size = max(7, adjusted_window_size | 1)  # Убедимся, что окно нечетное и >= 7
-            if adjusted_window_size and roi1.size and roi2.size:
-                ssim = compare_ssim(roi1, roi2, win_size=adjusted_window_size)
-                ssim_values.append(ssim)
-        return np.mean(ssim_values) if ssim_values else 0
+        self.btnLoadImage1 = QPushButton('Load Image 1')
+        self.btnLoadImage1.clicked.connect(lambda: self.load_image('image1', True))
+        layout.addWidget(self.btnLoadImage1)
 
-    def initUI(self):
-        self.setWindowTitle('Image Correlation Analysis')
-        self.setFixedSize(800, 600)
+        self.btnLoadImage2 = QPushButton('Load Image 2')
+        self.btnLoadImage2.clicked.connect(lambda: self.load_image('image2', False))
+        layout.addWidget(self.btnLoadImage2)
 
-        layout = QVBoxLayout(self)
-        btnLoadImage1 = QPushButton('Select Image 1 (Optics)', self)
-        btnLoadImage1.clicked.connect(lambda: self.loadImage('image1'))
-        layout.addWidget(btnLoadImage1)
+        self.btnProcess = QPushButton('Process and Analyze')
+        self.btnProcess.clicked.connect(self.process_and_analyze)
+        layout.addWidget(self.btnProcess)
 
-        btnLoadImage2 = QPushButton('Select Image 2 (SEM)', self)
-        btnLoadImage2.clicked.connect(lambda: self.loadImage('image2'))
-        layout.addWidget(btnLoadImage2)
+        self.setLayout(layout)
 
-        btnAnalyze = QPushButton('Analyze', self)
-        btnAnalyze.clicked.connect(self.analyzeImages)
-        layout.addWidget(btnAnalyze)
-
-    def loadImage(self, name):
-        filePath, _ = QFileDialog.getOpenFileName(self, 'Select Image', '',
-                                                  'Images (*.png *.xpm *.jpg *.tif *.jpeg)')
+    def load_image(self, key, optimize=True):
+        filePath, _ = QFileDialog.getOpenFileName(self, 'Select Image', '', 'Image files (*.jpg *.png *.jpeg *.tif)')
         if filePath:
-            image = adjust_image(filePath)
-            setattr(self, name, image)
-            cv2.imshow(name, image)
-            cv2.setMouseCallback(name, click_event, {'name': name, 'image': image, 'path': filePath})
+            img = adjust_image(filePath)
+            if optimize:
+                img = optimize_image_contrast(img, clip_limit=30.0)  # Передаем clip_limit для большего контраста
+            images[key] = img
+            cv2.namedWindow(key)
+            cv2.setMouseCallback(key, click_event, key)
+            cv2.imshow(key, images[key])
 
-    def analyzeImages(self):
-        if self.image1 is None or self.image2 is None or len(clicks['image1']) < 2 or len(clicks['image2']) < 2:
-            print("Both images and two points on each image are required.")
-            return
-        self.apply_transformation()
+    def process_and_analyze(self):
+        if len(clicks['image1']) == 2 and len(clicks['image2']) == 2:
+            # Расчет коэффициента увеличения
+            optics_vector = np.array(clicks['image1'][1]) - np.array(clicks['image1'][0])
+            sem_vector = np.array(clicks['image2'][1]) - np.array(clicks['image2'][0])
+            scale_factor = np.linalg.norm(optics_vector) / np.linalg.norm(sem_vector)
 
-    def initial_guess_from_clicks(self):
-        p1, p2 = clicks['image1'][0], clicks['image1'][1]
-        q1, q2 = clicks['image2'][0], clicks['image2'][1]
-        dist_p = np.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
-        dist_q = np.sqrt((q2[0] - q1[0])**2 + (q2[1] - q1[1])**2)
-        scale = dist_p / dist_q if dist_q != 0 else 1
-        dx = ((p1[0] + p2[0]) / 2 - (q1[0] + q2[0]) / 2) * scale
-        dy = ((p1[1] + p2[1]) / 2 - (q1[1] + q2[1]) / 2) * scale
-        angle = 0
-        return [dx, dy, angle, scale]
+            # Выводим значение масштаба в консоль
+            print(f"Scale factor: {scale_factor}")
 
-    def calculate_ssim(self, image1, image2, points1, points2, window_size=100):
-        ssim_values = []
-        for p1, p2 in zip(points1, points2):
-            x1, y1 = max(0, p1[0] - window_size // 2), max(0, p1[1] - window_size // 2)
-            x2, y2 = max(0, p2[0] - window_size // 2), max(0, p2[1] - window_size // 2)
+            # Расчет угла поворота
+            angle, _ = calculate_transformation(clicks['image1'], clicks['image2'])
 
-            roi1 = image1[y1:y1 + window_size, x1:x1 + window_size]
-            roi2 = image2[y2:y2 + window_size, x2:x2 + window_size]
+            # Масштабирование и поворот SEM изображения
+            transformed_image = transform_image(images['image2'], angle, scale_factor)
 
-            min_height = min(roi1.shape[0], roi2.shape[0])
-            min_width = min(roi1.shape[1], roi2.shape[1])
-            adjusted_window_size = min(min_height, min_width,
-                                       window_size) - 1  # Ensure win_size is smaller than ROI and odd
-            adjusted_window_size -= adjusted_window_size % 2  # Make it odd
+            # Определяем центр масштабированного изображения
+            center_x = transformed_image.shape[1] // 2
+            center_y = transformed_image.shape[0] // 2
 
-            # Ensure the window size is at least 7 and odd
-            adjusted_window_size = max(7, adjusted_window_size | 1)
+            # Определяем смещение для точек
+            dx = center_x - (clicks['image2'][0][0] + clicks['image2'][1][0]) // 2
+            dy = center_y - (clicks['image2'][0][1] + clicks['image2'][1][1]) // 2
 
-            if adjusted_window_size >= 7 and roi1.size > 0 and roi2.size > 0:
-                if len(roi1.shape) == 3:  # Check for multichannel image
-                    channel_axis = 2
-                else:
-                    channel_axis = None
+            # Корректируем координаты точек на изображении
+            corrected_points = [(p[0] + dx, p[1] + dy) for p in clicks['image1']]
 
-                ssim = compare_ssim(roi1[:adjusted_window_size, :adjusted_window_size],
-                                    roi2[:adjusted_window_size, :adjusted_window_size],
-                                    win_size=adjusted_window_size, channel_axis=channel_axis, full=False)
-                ssim_values.append(ssim)
+            # Обрезаем второе изображение с учетом смещения, чтобы точки оставались в центре
+            cropped_image = align_and_crop(transformed_image, images['image1'], corrected_points[0],
+                                           clicks['image1'][0])
 
-        return np.mean(ssim_values) if ssim_values else 0
+            # Сохранение изображений
+            transformed_image_path = "transformed_image.png"
+            combined_image_path = "combined_image.png"
 
-    def transform_image(self, image, dx, dy, angle, scale):
-        rows, cols = image.shape[:2]
-        center = (cols // 2, rows // 2)
-        M = cv2.getRotationMatrix2D(center, angle, scale)
-        M[:, 2] += [dx, dy]
-        # Использование cv2.INTER_CUBIC для возможного улучшения качества
-        transformed = cv2.warpAffine(image, M, (cols, rows), flags=cv2.INTER_CUBIC)
-        return transformed
+            cv2.imwrite(transformed_image_path, cv2.cvtColor(cropped_image, cv2.COLOR_RGB2BGR))
 
-    def save_and_display_results(self, transformed_image, dx, dy, angle, scale, ssim_value):
-        # Сохранение результата
-        cv2.imwrite("final_transformed_image.png", transformed_image)
-        with open("analysis_results.txt", "w") as file:
-            file.write(f"DX: {dx}, DY: {dy}, Angle: {angle}, Scale: {scale}, SSIM: {ssim_value}\n")
+            # Создание комбинированного изображения
+            h, w, _ = images['image1'].shape
+            combined_image = np.zeros((h, w * 2, 3), dtype=np.uint8)
+            combined_image[:, :w] = images['image1']
+            combined_image[:, w:] = cropped_image
+            cv2.imwrite(combined_image_path, cv2.cvtColor(combined_image, cv2.COLOR_RGB2BGR))
 
-        # Визуализация результатов
-        cv2.imshow("Transformed SEM Image", transformed_image)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
-
-    def apply_transformation(self):
-        if len(clicks['image1']) < 2 or len(clicks['image2']) < 2:
-            print("Not enough points selected on one of the images.")
-            return
-
-        initial_guess = self.initial_guess_from_clicks()
-        optimized_params = minimize(optimization_objective, initial_guess,
-                                    args=(self.image1, self.image2, clicks['image1'], clicks['image2']),
-                                    method='L-BFGS-B', bounds=[(-1000, 1000), (-1000, 1000), (-360, 360), (0.1, 10)]).x
-
-        dx, dy, angle, scale = optimized_params
-        print(f"Optimized parameters: dx={dx}, dy={dy}, angle={angle}, scale={scale}")
-
-        transformed_image = self.transform_image(self.image2, dx, dy, angle, scale)
-
-        ssim_value = self.calculate_ssim(self.image1, transformed_image, clicks['image1'], clicks['image2'])
-        print(f"SSIM between selected areas: {ssim_value}")
-
-        # Вызов функции для сохранения и отображения результатов
-        self.save_and_display_results(transformed_image, dx, dy, angle, scale, ssim_value)
+            print(f"Transformed image saved as {transformed_image_path}")
+            print(f"Combined image saved as {combined_image_path}")
+        else:
+            print("Please select exactly two points on each image.")
 
 
-def main():
+if __name__ == '__main__':
+    images = {'image1': None, 'image2': None}
     app = QApplication(sys.argv)
     ex = ImageApp()
     ex.show()
     sys.exit(app.exec_())
-
-if __name__ == '__main__':
-    main()
