@@ -8,13 +8,24 @@ images = {'image1': None, 'image2': None}
 
 
 def adjust_image(image_path):
-    img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+    img = cv2.imread(image_path)
     if img is not None:
-        if img.dtype == np.uint16:
-            img = cv2.normalize(img, None, 0, 65535, cv2.NORM_MINMAX)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     return img
 
+
+def optimize_image_contrast(image, clip_limit=3.0):
+    if image.ndim == 3:
+        lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
+        l_clahe = clahe.apply(l)
+        lab_clahe = cv2.merge((l_clahe, a, b))
+        result = cv2.cvtColor(lab_clahe, cv2.COLOR_LAB2RGB)
+    else:
+        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
+        result = clahe.apply(image)
+    return result
 
 
 def align_and_crop(transformed_image, reference_image, trans_first_point, ref_first_point):
@@ -30,6 +41,23 @@ def align_and_crop(transformed_image, reference_image, trans_first_point, ref_fi
     aligned_cropped_image = aligned_image[:reference_image.shape[0], :reference_image.shape[1]]
 
     return aligned_cropped_image
+
+
+
+
+def optimize_image_contrast(image, clip_limit=3.0):
+    if image.ndim == 3:
+        lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
+        l_clahe = clahe.apply(l)
+        lab_clahe = cv2.merge((l_clahe, a, b))
+        result = cv2.cvtColor(lab_clahe, cv2.COLOR_LAB2RGB)
+    else:
+        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
+        result = clahe.apply(image)
+    return result
+
 
 
 def click_event(event, x, y, flags, param):
@@ -113,13 +141,15 @@ class ImageApp(QWidget):
         self.setLayout(layout)
 
     def load_image(self, key, optimize=True):
-        filePath, _ = QFileDialog.getOpenFileName(self, 'Select Image', '', 'Image files (*.jpg *.png *.jpeg *.tif *.tiff)')
+        filePath, _ = QFileDialog.getOpenFileName(self, 'Select Image', '', 'Image files (*.jpg *.png *.jpeg *.tif)')
         if filePath:
             img = adjust_image(filePath)
+            if optimize:
+                img = optimize_image_contrast(img, clip_limit=30.0)  # Передаем clip_limit для большего контраста
             images[key] = img
             cv2.namedWindow(key)
             cv2.setMouseCallback(key, click_event, key)
-            cv2.imshow(key, img)
+            cv2.imshow(key, images[key])
 
     def process_and_analyze(self):
         if len(clicks['image1']) == 2 and len(clicks['image2']) == 2:
